@@ -5,6 +5,7 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    str,
 };
 
 use bytes::Bytes;
@@ -164,13 +165,27 @@ impl KVStore {
     }
 
     fn extend_vote(&self, _vote: request::ExtendVote) -> response::ExtendVote {
+        println!("\n\n\n\nextending vote\n\n\n\n");
         response::ExtendVote {
-            vote_extension: Bytes::default(),
+            vote_extension: Bytes::from("VE"),
         }
     }
 
-    fn verify_vote(&self, _vote: request::VerifyVoteExtension) -> response::VerifyVoteExtension {
-        response::VerifyVoteExtension::Accept
+    fn verify_vote(&self, vote: request::VerifyVoteExtension) -> response::VerifyVoteExtension {
+        println!("\n\n\n\nverifying extended vote\n\n\n\n");
+
+        // Convert vote_extension from Bytes to String
+        if let Ok(vote_extension_str) = str::from_utf8(&vote.vote_extension) {
+            // Check if the vote_extension contains the string "VE"
+            if vote_extension_str.contains("VE") {
+                response::VerifyVoteExtension::Accept
+            } else {
+                response::VerifyVoteExtension::Reject  
+            }
+        } else {
+            // If conversion fails, reject the vote
+            response::VerifyVoteExtension::Reject
+        }
     }
 
     fn compute_apphash(&self) -> [u8; 8] {
