@@ -12,6 +12,7 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use structopt::StructOpt;
 use tower::{Service, ServiceBuilder};
+use tracing::{info, error};
 
 use tendermint::{
     abci::{
@@ -164,26 +165,31 @@ impl KVStore {
         }
     }
 
+    // Extend Vote Function
     fn extend_vote(&self, _vote: request::ExtendVote) -> response::ExtendVote {
-        println!("\n\n\n\nextending vote\n\n\n\n");
+        info!("Extending vote");
         response::ExtendVote {
             vote_extension: Bytes::from("VE"),
         }
     }
 
+    // Verify Vote Extension Function
     fn verify_vote(&self, vote: request::VerifyVoteExtension) -> response::VerifyVoteExtension {
-        println!("\n\n\n\nverifying extended vote\n\n\n\n");
+        info!("Verifying extended vote");
 
         // Convert vote_extension from Bytes to String
         if let Ok(vote_extension_str) = str::from_utf8(&vote.vote_extension) {
             // Check if the vote_extension contains the string "VE"
             if vote_extension_str.contains("VE") {
+                info!("Vote extension accepted");
                 response::VerifyVoteExtension::Accept
             } else {
+                info!("Vote extension rejected");
                 response::VerifyVoteExtension::Reject  
             }
         } else {
             // If conversion fails, reject the vote
+            error!("Failed to convert vote extension to string");
             response::VerifyVoteExtension::Reject
         }
     }
