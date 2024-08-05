@@ -54,12 +54,11 @@ impl Service<Request> for KVStore {
             // handled messages
             Request::Info(_) => Response::Info(self.info()),
             Request::Query(query) => Response::Query(self.query(query.data)),
-            // Note: https://github.com/tendermint/tendermint/blob/v0.38.x/spec/abci/abci%2B%2B_tmint_expected_behavior.md#adapting-existing-applications-that-use-abci
-            Request::PrepareProposal(prepare_prop) => Response::PrepareProposal(PrepareProposal {
-                txs: prepare_prop.txs,
-            }),
-            Request::ProcessProposal(..) => {
-                Response::ProcessProposal(response::ProcessProposal::Accept)
+            Request::PrepareProposal(prepare_prop) => {
+                Response::PrepareProposal(self.prepare_proposal(prepare_prop))
+            }
+            Request::ProcessProposal(proposal) => {
+                Response::ProcessProposal(self.process_proposal(proposal))
             }
             Request::ExtendVote(vote) => Response::ExtendVote(self.extend_vote(vote)),
             Request::VerifyVoteExtension(vote) => {
@@ -131,7 +130,75 @@ impl KVStore {
         }
     }
 
+    // Custom prepare_proposal function
+    fn prepare_proposal(&self, prepare_prop: request::PrepareProposal) -> response::PrepareProposal {
+        // Implement your custom logic here
+        info!("Preparing proposal with {} transactions", prepare_prop.txs.len());
+
+        let mut new_tx: Vec<Bytes> = Vec::new();
+        let mut aggr_ve = "".to_owned();
+
+        let last_commit = &prepare_prop.local_last_commit;
+        if let Some(extended_info) = last_commit {
+            for vote in &extended_info.votes {
+                let bytes_vec = vote.vote_extension.to_vec();
+                let s = match str::from_utf8(&bytes_vec) {
+                    Ok(v) => v,
+                    Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+                };
+                aggr_ve.push_str(s);
+            }
+        }
+        // append ves at the top of the proposal
+        new_tx.push(Bytes::from(aggr_ve));
+
+        // Append the original transactions
+        new_tx.extend(prepare_prop.txs);
+
+        response::PrepareProposal {
+            txs: new_tx,
+        }
+    }
+
+    fn process_proposal(&mut self, proposal: request::ProcessProposal) -> response::ProcessProposal {
+        // Implement your custom logic here
+        info!("Processing proposal with {} transactions", proposal.txs.len());
+        
+        let ext = &proposal.txs[0];
+        let ve_bytes = ext.to_vec();
+        let aggr_ve = match str::from_utf8(&ve_bytes) {
+            Ok(v) => v,
+            Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+        };
+        
+        let mut key = "aggr_ks_".to_owned();
+        let ht = proposal.height.to_string();
+        key.push_str(&ht);
+        
+
+        self.store.insert(key, aggr_ve.to_string());
+
+        response::ProcessProposal::Accept
+    }
+
+    // Simulated BeginBlock
+    fn begin_block(&mut self, _block: &request::FinalizeBlock) {
+        info!("Begin block");
+        
+        // for tx in &block.txs {
+        //     // Convert tx (which is of type Bytes) to a String
+        //     match std::str::from_utf8(tx.as_ref()) {
+        //         Ok(tx_str) => info!("processing tx: {}", tx_str),
+        //         Err(e) => error!("Failed to convert tx to string: {:?}", e),
+        //     }
+        // }
+        // Place any logic here that should happen at the beginning of a block
+    }
+
     fn finalize_block(&mut self, block: request::FinalizeBlock) -> response::FinalizeBlock {
+        // Simulate BeginBlock
+        self.begin_block(&block);
+        
         let mut tx_results = Vec::new();
         for tx in block.txs {
             tx_results.push(self.execute_tx(tx));
