@@ -16,7 +16,7 @@ use tracing::{info, error};
 
 use tendermint::{
     abci::{
-        response::{self, PrepareProposal},
+        response::{self},
         Event, EventAttributeIndexExt,
     },
     v0_38::abci::request,
@@ -94,7 +94,9 @@ impl KVStore {
     }
 
     fn query(&self, query: Bytes) -> response::Query {
+        println!("\n\n\n\n Processing query \n\n\n\n");
         let key = String::from_utf8(query.to_vec()).unwrap();
+        println!("{}", key);
         let (value, log) = match self.store.get(&key) {
             Some(value) => (value.clone(), "exists".to_string()),
             None => ("".to_string(), "does not exist".to_string()),
@@ -163,8 +165,15 @@ impl KVStore {
     fn process_proposal(&mut self, proposal: request::ProcessProposal) -> response::ProcessProposal {
         // Implement your custom logic here
         info!("Processing proposal with {} transactions", proposal.txs.len());
-        
-        let ext = &proposal.txs[0];
+
+        response::ProcessProposal::Accept
+    }
+
+    // Simulated BeginBlock
+    fn begin_block(&mut self, block: &request::FinalizeBlock) {
+        info!("Begin block");
+        // Place any logic here that should happen at the beginning of a block
+        let ext = &block.txs[0];
         let ve_bytes = ext.to_vec();
         let aggr_ve = match str::from_utf8(&ve_bytes) {
             Ok(v) => v,
@@ -172,27 +181,11 @@ impl KVStore {
         };
         
         let mut key = "aggr_ks_".to_owned();
-        let ht = proposal.height.to_string();
+        let ht = block.height.to_string();
         key.push_str(&ht);
         
 
         self.store.insert(key, aggr_ve.to_string());
-
-        response::ProcessProposal::Accept
-    }
-
-    // Simulated BeginBlock
-    fn begin_block(&mut self, _block: &request::FinalizeBlock) {
-        info!("Begin block");
-        
-        // for tx in &block.txs {
-        //     // Convert tx (which is of type Bytes) to a String
-        //     match std::str::from_utf8(tx.as_ref()) {
-        //         Ok(tx_str) => info!("processing tx: {}", tx_str),
-        //         Err(e) => error!("Failed to convert tx to string: {:?}", e),
-        //     }
-        // }
-        // Place any logic here that should happen at the beginning of a block
     }
 
     fn finalize_block(&mut self, block: request::FinalizeBlock) -> response::FinalizeBlock {
