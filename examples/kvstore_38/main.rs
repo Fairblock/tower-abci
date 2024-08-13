@@ -13,6 +13,7 @@ use futures::future::FutureExt;
 use structopt::StructOpt;
 use tower::{Service, ServiceBuilder};
 use tracing::{info, error};
+// use bls12_381::{G1Projective, Scalar};
 
 use tendermint::{
     abci::{
@@ -138,7 +139,8 @@ impl KVStore {
         info!("Preparing proposal with {} transactions", prepare_prop.txs.len());
 
         let mut new_tx: Vec<Bytes> = Vec::new();
-        let mut aggr_ve = "".to_owned();
+        let mut aggr_ve = vec![String::new(); 126];
+
 
         let last_commit = &prepare_prop.local_last_commit;
         if let Some(extended_info) = last_commit {
@@ -148,7 +150,7 @@ impl KVStore {
                     Ok(v) => v,
                     Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
                 };
-                aggr_ve.push_str(s);
+                aggr_ve.push(s.to_string());
             }
         }
         // append ves at the top of the proposal
@@ -179,7 +181,7 @@ impl KVStore {
             Ok(v) => v,
             Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
         };
-        
+
         let mut key = "aggr_ks_".to_owned();
         let ht = block.height.to_string();
         key.push_str(&ht);
@@ -318,4 +320,89 @@ async fn main() {
             .await
             .unwrap();
     }
+}
+
+
+struct ExtractedKey {
+    sk: G2Projective,
+    index: u32,
+}
+
+struct Commitment {
+    index: u32,
+    commitment: G2Projective,
+}
+
+// Assuming HashablePoint trait is defined like this
+trait HashablePoint {
+    fn hash(&self, id: &[u8]) -> G2Projective;
+}
+
+impl HashablePoint for G2Projective {
+    fn hash(&self, id: &[u8]) -> G2Projective {
+        let mut hasher = Sha256::new();
+        hasher.update(id);
+        let result = hasher.finalize();
+
+        // Hash to G2 using the result
+        G2Projective::hash_to_curve(&result)
+    }
+}
+
+fn verify_share(suite: &G2Projective, commitment: &Commitment, received_share: &ExtractedKey, qid: &G2Projective) -> bool {
+    // Implement the verification logic here
+    true // Placeholder
+}
+
+fn lagrange_coefficient(index: u32, s: &[u32]) -> Scalar {
+    // Implement Lagrange coefficient calculation here
+    Scalar::one() // Placeholder
+}
+
+fn aggregate(sk_shares: Vec<G2Projective>) -> G2Projective {
+    sk_shares.into_iter().reduce(|acc, share| acc + share).unwrap()
+}
+
+fn process_sk(suite: &G2Projective, share: &ExtractedKey, s: &[u32]) -> ExtractedKey {
+    let lagrange_coef = lagrange_coefficient(share.index, s);
+    let identity_key = share.sk * lagrange_coef;
+    ExtractedKey {
+        sk: identity_key,
+        index: share.index,
+    }
+}
+
+fn aggregate_sk(
+    suite: &G2Projective,
+    received_shares: Vec<ExtractedKey>,
+    commitments: Vec<Commitment>,
+    id: &[u8],
+) -> (G2Projective, Vec<u32>) {
+    let mut sk_shares = vec![];
+    let mut invalid = vec![];
+    let mut valid = vec![];
+    let mut valid_share = vec![];
+
+    for i in 0..received_shares.len() {
+        let received_share = &received_shares[i];
+        let commitment = &commitments[i];
+
+        let h_g2: &dyn HashablePoint = suite;  // Using the suite as the HashablePoint trait
+        let qid = h_g2.hash(id);
+
+        if verify_share(suite, commitment, received_share, &qid) {
+            valid.push(received_share.index);
+            valid_share.push(received_share.clone());
+        } else {
+            invalid.push(commitment.index);
+        }
+    }
+
+    for r in valid_share.iter() {
+        let processed_share = process_sk(suite, r, &valid);
+        sk_shares.push(processed_share.sk);
+    }
+
+    let sk = aggregate(sk_shares);
+    (sk, invalid)
 }
