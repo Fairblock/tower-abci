@@ -12,8 +12,11 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use structopt::StructOpt;
 use tower::{Service, ServiceBuilder};
-use tracing::{info, error};
-// use bls12_381::{G1Projective, Scalar};
+use tracing::info;
+use bls12_381::{pairing, G1Projective, G2Affine, G2Projective, Scalar};
+use serde::{Serialize, Deserialize};
+use hex::decode;
+use group::GroupEncoding;
 
 use tendermint::{
     abci::{
@@ -139,22 +142,78 @@ impl KVStore {
         info!("Preparing proposal with {} transactions", prepare_prop.txs.len());
 
         let mut new_tx: Vec<Bytes> = Vec::new();
-        let mut aggr_ve = vec![String::new(); 126];
+        let mut valid_shares: Vec<ExtractedKey> = Vec::new();
 
+        let mut sk_shares: Vec<G2Projective> = Vec::new();
+        let mut sk = G2Projective::identity();
 
         let last_commit = &prepare_prop.local_last_commit;
+
+        let mut valid_indices: Vec<u64> = Vec::new();
         if let Some(extended_info) = last_commit {
             for vote in &extended_info.votes {
                 let bytes_vec = vote.vote_extension.to_vec();
-                let s = match str::from_utf8(&bytes_vec) {
-                    Ok(v) => v,
-                    Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+
+                // Deserialize from JSON bytes
+                let deserialized_json: VEdata = serde_json::from_slice(&bytes_vec).unwrap();
+                println!("Deserialized from JSON: {:?}", deserialized_json);
+
+                // convert keyshare to bytes from hex
+                let keyshare_hex = deserialized_json.data;
+                let keyshare_byte = match decode(keyshare_hex) {
+                    Ok(bytes) => bytes,
+                    Err(_) => todo!(),
                 };
-                aggr_ve.push(s.to_string());
+
+                //====================================//
+                // aggregate VE data with black magic //
+                //====================================//
+                
+                // Convert `Vec<u8>` to a reference to a fixed-size array
+                let mut new_share_point_projective = G2Projective::default();
+                if keyshare_byte.len() == 96 {
+                    if let Ok(array_ref) = <&[u8; 96]>::try_from(keyshare_byte.as_slice()) {
+                        let new_share_point_option = G2Affine::from_compressed(array_ref);
+            
+                        // Unwrap the CtOption safely
+                        if new_share_point_option.is_some().into() {
+                            let new_share_point = new_share_point_option.unwrap();
+                            new_share_point_projective = G2Projective::from(new_share_point);
+            
+                            println!("Successfully converted to G2Projective: {:?}", new_share_point_projective);
+                        } else {
+                            eprintln!("Failed to unmarshal binary key into a valid G2Affine point");
+                        }
+                    } else {
+                        eprintln!("Failed to convert Vec<u8> to &[u8; 96]");
+                    }
+                } else {
+                    eprintln!("Error: The byte key is not exactly 96 bytes long.");
+                }
+
+
+                let new_extracted_key = ExtractedKey {
+                    index: deserialized_json.index.into(),
+                    sk: new_share_point_projective
+                };
+
+                valid_shares.push(new_extracted_key);
+                valid_indices.push(deserialized_json.index)
+                
             }
+
+            for share in valid_shares {
+                let processed_share = process_sk( &share, &valid_indices);
+                sk_shares.push(processed_share.sk);
+            }
+
+            sk = aggregate(sk_shares);
         }
-        // append ves at the top of the proposal
-        new_tx.push(Bytes::from(aggr_ve));
+
+        let aggr_ks = Bytes::from(sk.to_bytes().as_ref().to_vec());
+
+        // append aggregated keyshare at the top of the proposal
+        new_tx.push(aggr_ks);
 
         // Append the original transactions
         new_tx.extend(prepare_prop.txs);
@@ -228,32 +287,51 @@ impl KVStore {
     }
 
     // Extend Vote Function
-    fn extend_vote(&self, _vote: request::ExtendVote) -> response::ExtendVote {
+    fn extend_vote(&self, vote: request::ExtendVote) -> response::ExtendVote {
         info!("Extending vote");
+        
+        // generate keyshare of validator with black magic
+        // keyshare = generate_keyshare()
+
+        // get index from validator config
+
+        let vedata = VEdata {
+            data: "VE data".to_string(),
+            height: vote.height.into(),
+            index: 1,
+        };
+    
+        // Serialize to JSON bytes
+        let json_bytes = serde_json::to_vec(&vedata).unwrap();
+        println!("JSON Bytes: {:?}", json_bytes);
+
         response::ExtendVote {
-            vote_extension: Bytes::from("VE"),
+            vote_extension: json_bytes.into(),
         }
     }
 
     // Verify Vote Extension Function
-    fn verify_vote(&self, vote: request::VerifyVoteExtension) -> response::VerifyVoteExtension {
+    fn verify_vote(&self, _vote: request::VerifyVoteExtension) -> response::VerifyVoteExtension {
         info!("Verifying extended vote");
+        response::VerifyVoteExtension::Accept
 
-        // Convert vote_extension from Bytes to String
-        if let Ok(vote_extension_str) = str::from_utf8(&vote.vote_extension) {
-            // Check if the vote_extension contains the string "VE"
-            if vote_extension_str.contains("VE") {
-                info!("Vote extension accepted");
-                response::VerifyVoteExtension::Accept
-            } else {
-                info!("Vote extension rejected");
-                response::VerifyVoteExtension::Reject  
-            }
-        } else {
-            // If conversion fails, reject the vote
-            error!("Failed to convert vote extension to string");
-            response::VerifyVoteExtension::Reject
-        }
+        // Skip all verification for now
+        // TODO: Add verification
+        // // Convert vote_extension from Bytes to String
+        // if let Ok(vote_extension_str) = str::from_utf8(&vote.vote_extension) {
+        //     // Check if the vote_extension contains the string "VE"
+        //     if vote_extension_str.contains("VE") {
+        //         info!("Vote extension accepted");
+        //         response::VerifyVoteExtension::Accept
+        //     } else {
+        //         info!("Vote extension rejected");
+        //         response::VerifyVoteExtension::Reject  
+        //     }
+        // } else {
+        //     // If conversion fails, reject the vote
+        //     error!("Failed to convert vote extension to string");
+        //     response::VerifyVoteExtension::Reject
+        // }
     }
 
     fn compute_apphash(&self) -> [u8; 8] {
@@ -325,84 +403,59 @@ async fn main() {
 
 struct ExtractedKey {
     sk: G2Projective,
-    index: u32,
+    index: u64,
 }
 
-struct Commitment {
-    index: u32,
-    commitment: G2Projective,
+// struct Commitment {
+//     index: u32,
+//     commitment: G2Projective,
+// }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct VEdata {
+    data: String,
+    height: u64,
+    index: u64
 }
 
-// Assuming HashablePoint trait is defined like this
-trait HashablePoint {
-    fn hash(&self, id: &[u8]) -> G2Projective;
-}
+// fn verify_share(suite: &G2Projective, commitment: &Commitment, received_share: &ExtractedKey, qid: &G2Projective) -> bool {
+//     // Implement the verification logic here
+//     true // Placeholder
+// }
 
-impl HashablePoint for G2Projective {
-    fn hash(&self, id: &[u8]) -> G2Projective {
-        let mut hasher = Sha256::new();
-        hasher.update(id);
-        let result = hasher.finalize();
-
-        // Hash to G2 using the result
-        G2Projective::hash_to_curve(&result)
-    }
-}
-
-fn verify_share(suite: &G2Projective, commitment: &Commitment, received_share: &ExtractedKey, qid: &G2Projective) -> bool {
-    // Implement the verification logic here
-    true // Placeholder
-}
-
-fn lagrange_coefficient(index: u32, s: &[u32]) -> Scalar {
+fn lagrange_coefficient(index: u64, s: &[u64]) -> Scalar {
     // Implement Lagrange coefficient calculation here
-    Scalar::one() // Placeholder
+    let mut nominator = Scalar::one();
+    let mut denominator = Scalar::one();
+    let mut temp: Scalar;
+    let mut temp1: Scalar;
+
+    for &si in s {
+        if si != index {
+            // nominator *= s
+            temp = Scalar::from(si as u64);
+            nominator *= temp;
+
+            // denominator *= (s - signer)
+            temp = Scalar::from(si as u64);
+            temp1 = Scalar::from(index);
+            denominator *= temp - temp1;
+        }
+    }
+
+    // outScalar = nominator / denominator
+    nominator * denominator.invert().unwrap_or(Scalar::zero()) // Handling division by zero case
 }
 
 fn aggregate(sk_shares: Vec<G2Projective>) -> G2Projective {
     sk_shares.into_iter().reduce(|acc, share| acc + share).unwrap()
 }
 
-fn process_sk(suite: &G2Projective, share: &ExtractedKey, s: &[u32]) -> ExtractedKey {
+fn process_sk(share: &ExtractedKey, s: &[u64]) -> ExtractedKey {
     let lagrange_coef = lagrange_coefficient(share.index, s);
     let identity_key = share.sk * lagrange_coef;
     ExtractedKey {
         sk: identity_key,
         index: share.index,
     }
-}
-
-fn aggregate_sk(
-    suite: &G2Projective,
-    received_shares: Vec<ExtractedKey>,
-    commitments: Vec<Commitment>,
-    id: &[u8],
-) -> (G2Projective, Vec<u32>) {
-    let mut sk_shares = vec![];
-    let mut invalid = vec![];
-    let mut valid = vec![];
-    let mut valid_share = vec![];
-
-    for i in 0..received_shares.len() {
-        let received_share = &received_shares[i];
-        let commitment = &commitments[i];
-
-        let h_g2: &dyn HashablePoint = suite;  // Using the suite as the HashablePoint trait
-        let qid = h_g2.hash(id);
-
-        if verify_share(suite, commitment, received_share, &qid) {
-            valid.push(received_share.index);
-            valid_share.push(received_share.clone());
-        } else {
-            invalid.push(commitment.index);
-        }
-    }
-
-    for r in valid_share.iter() {
-        let processed_share = process_sk(suite, r, &valid);
-        sk_shares.push(processed_share.sk);
-    }
-
-    let sk = aggregate(sk_shares);
-    (sk, invalid)
 }
